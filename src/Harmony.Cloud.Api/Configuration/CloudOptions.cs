@@ -9,5 +9,6 @@ public sealed class CloudOptions
     public string Auth0Domain { get; init; } = "";
     public string Auth0ClientId { get; init; } = "";
     public string Auth0ClientSecret { get; init; } = "";
-    public string Auth0Audience { get; init; } = "https://harmony-api";
+    public string Auth0Audience { get; init; } = "https://harmony-resolver";
+    public string FcmServiceAccountJsonBase64 { get; init; } = "";
 }

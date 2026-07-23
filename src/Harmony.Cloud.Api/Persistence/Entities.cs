@@ -36,8 +36,28 @@ public sealed class DeviceEntity
     public required string AccountId { get; set; }
     public Guid DeviceId { get; set; }
     public required string Name { get; set; }
+    public string Platform { get; set; } = "unknown";
+    public string AppVersion { get; set; } = "unknown";
+    public string? PushTokenCiphertext { get; set; }
+    public DateTimeOffset? PushRegisteredAt { get; set; }
+    public DateTimeOffset? LastSeenAt { get; set; }
+    public bool IsRealtimeConnected { get; set; }
     public long LastSequence { get; set; }
     public long LastCheckpoint { get; set; }
     public bool SyncPaused { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class PlaybackCommandEntity
+{
+    public required string AccountId { get; set; }
+    public Guid CommandId { get; set; }
+    public Guid SourceDeviceId { get; set; }
+    public Guid TargetDeviceId { get; set; }
+    public required string Type { get; set; }
+    public required JsonDocument Payload { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? AcknowledgedAt { get; set; }
+    public bool Applied { get; set; }
 }

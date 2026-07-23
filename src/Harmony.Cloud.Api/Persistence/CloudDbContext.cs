@@ -7,6 +7,7 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
     public DbSet<SyncEventEntity> SyncEvents => Set<SyncEventEntity>();
     public DbSet<SnapshotEntity> Snapshots => Set<SnapshotEntity>();
     public DbSet<DeviceEntity> Devices => Set<DeviceEntity>();
+    public DbSet<PlaybackCommandEntity> PlaybackCommands => Set<PlaybackCommandEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -48,9 +49,30 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
         devices.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
         devices.Property(x => x.DeviceId).HasColumnName("device_id");
         devices.Property(x => x.Name).HasColumnName("name").HasMaxLength(80);
+        devices.Property(x => x.Platform).HasColumnName("platform").HasMaxLength(24);
+        devices.Property(x => x.AppVersion).HasColumnName("app_version").HasMaxLength(80);
+        devices.Property(x => x.PushTokenCiphertext).HasColumnName("push_token_ciphertext").HasMaxLength(8192);
+        devices.Property(x => x.PushRegisteredAt).HasColumnName("push_registered_at");
+        devices.Property(x => x.LastSeenAt).HasColumnName("last_seen_at");
+        devices.Property(x => x.IsRealtimeConnected).HasColumnName("is_realtime_connected");
         devices.Property(x => x.LastSequence).HasColumnName("last_sequence");
         devices.Property(x => x.LastCheckpoint).HasColumnName("last_checkpoint");
         devices.Property(x => x.SyncPaused).HasColumnName("sync_paused");
         devices.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+
+        var commands = modelBuilder.Entity<PlaybackCommandEntity>();
+        commands.ToTable("cloud_playback_commands");
+        commands.HasKey(x => new { x.AccountId, x.CommandId });
+        commands.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
+        commands.Property(x => x.CommandId).HasColumnName("command_id");
+        commands.Property(x => x.SourceDeviceId).HasColumnName("source_device_id");
+        commands.Property(x => x.TargetDeviceId).HasColumnName("target_device_id");
+        commands.Property(x => x.Type).HasColumnName("type").HasMaxLength(48);
+        commands.Property(x => x.Payload).HasColumnName("payload").HasColumnType("jsonb");
+        commands.Property(x => x.CreatedAt).HasColumnName("created_at");
+        commands.Property(x => x.ExpiresAt).HasColumnName("expires_at");
+        commands.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");
+        commands.Property(x => x.Applied).HasColumnName("applied");
+        commands.HasIndex(x => new { x.AccountId, x.TargetDeviceId, x.ExpiresAt });
     }
 }

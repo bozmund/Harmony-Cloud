@@ -77,7 +77,7 @@ flowchart LR
 - Audio backup pokretati samo na Wi-Fi mreži i kad je baterija iznad 50%. Slati strogo jednu datoteku odjednom, podržati nastavak prekinutog uploada i omogućiti ručno pokretanje.
 - Nuditi samo postojeće lokalne datoteke s validnim YouTube ID-em koje Resolver još nema.
 - Na promjenu queuea serveru poslati sljedeća tri ID-a. Lokalni preload ostaje privremen, cilja približno 5 sekundi i koristi korisnikov raspon 1–3 pjesme.
-- Sve Resolver i Cloud pozive prebaciti na zajednički hostname i novi Auth0 audience.
+- Sve Resolver i Cloud pozive koristiti sa zajedničkim hostnameom i postojećim Auth0 audienceom `https://harmony-resolver`.
 
 ### Harmony Platform
 
@@ -88,7 +88,7 @@ flowchart LR
 - RabbitMQ TLS cert mora vrijediti za `harmony-resolver.duckdns.org`; lokalni downloader koristi isti hostname na portu 5671.
 - Resolver i Cloud workflowi testiraju i objavljuju immutable GHCR image te dispatchaju Platform deployment. Samo Platform action SSH-om mijenja produkciju, pokreće migracije, health check i rollback.
 - Platform action automatski ažurira DuckDNS IP, obnavlja TLS i deploya bez ručnih VPS naredbi.
-- Auth0 koristi novi zajednički audience, user JWT za oba API-ja te odvojene M2M permissione za downloader ingest i Cloud backup grant.
+- Auth0 koristi postojeći zajednički audience `https://harmony-resolver`, user JWT za oba API-ja te odvojene M2M permissione za downloader ingest i Cloud backup grant.
 
 ## Testiranje i rollout
 

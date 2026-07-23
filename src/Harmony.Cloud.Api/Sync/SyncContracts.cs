@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace Harmony.Cloud.Api.Sync;
 
-public sealed record RegisterDeviceRequest(Guid DeviceId, string Name);
+public sealed record RegisterDeviceRequest(Guid DeviceId, string Name, string Platform = "unknown", string AppVersion = "unknown");
 public sealed record SyncRequest(Guid DeviceId, long Checkpoint, IReadOnlyList<ClientSyncEvent> Events);
 public sealed record ClientSyncEvent(
     Guid EventId,
