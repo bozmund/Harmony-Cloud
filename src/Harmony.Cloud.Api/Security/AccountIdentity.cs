@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Security.Claims;
 using System.Text;
 using Harmony.Cloud.Api.Configuration;
 
@@ -8,7 +9,11 @@ public sealed class AccountIdentity(CloudOptions options)
 {
     public string Resolve(HttpContext context)
     {
-        var subject = context.User.FindFirst("sub")?.Value;
+        // JwtBearer can preserve Auth0's `sub` claim or map it to the
+        // standard .NET name-identifier claim. Both represent the same
+        // authenticated subject and must derive the same opaque account id.
+        var subject = context.User.FindFirst("sub")?.Value
+            ?? context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         if (string.IsNullOrWhiteSpace(subject) && context.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment())
             subject = context.Request.Headers["X-Test-Subject"].FirstOrDefault();
         if (string.IsNullOrWhiteSpace(subject))

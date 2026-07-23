@@ -3,6 +3,7 @@ using Harmony.Cloud.Api.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System.Security.Claims;
 using Xunit;
 
 namespace Harmony.Cloud.UnitTests;
@@ -26,6 +27,19 @@ public sealed class AccountIdentityTests
         Assert.Equal(64, firstId.Length);
     }
 
+    [Fact]
+    public void Mapped_name_identifier_claim_resolves_to_the_same_account_id()
+    {
+        var service = new AccountIdentity(new CloudOptions
+        {
+            IdentityHmacKey = "test-only-key-with-at-least-thirty-two-characters"
+        });
+        var subject = "auth0|private-user";
+        var mapped = ContextWithMappedSubject(subject);
+
+        Assert.Equal(service.Resolve(Context(subject)), service.Resolve(mapped));
+    }
+
     private static DefaultHttpContext Context(string subject)
     {
         var services = new ServiceCollection()
@@ -33,6 +47,17 @@ public sealed class AccountIdentityTests
             .BuildServiceProvider();
         var context = new DefaultHttpContext { RequestServices = services };
         context.Request.Headers["X-Test-Subject"] = subject;
+        return context;
+    }
+
+    private static DefaultHttpContext ContextWithMappedSubject(string subject)
+    {
+        var context = Context(subject: "unused");
+        context.Request.Headers.Remove("X-Test-Subject");
+        context.User = new ClaimsPrincipal(
+            new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, subject)],
+                authenticationType: "test"));
         return context;
     }
 
