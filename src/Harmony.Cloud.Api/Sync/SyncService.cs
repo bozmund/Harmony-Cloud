@@ -66,14 +66,14 @@ public sealed class SyncService(
         device.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
 
-        var changes = await db.SyncEvents.AsNoTracking()
+        var changeEntities = await db.SyncEvents.AsNoTracking()
             .Where(x => x.AccountId == accountId && x.Revision > request.Checkpoint)
             .OrderBy(x => x.Revision)
             .Take(options.MaxEventsPerSync)
-            .Select(x => new ServerSyncEvent(
-                x.Revision, x.EventId, x.DeviceId, x.DeviceSequence, x.HlcPhysicalMs, x.HlcLogical,
-                x.EntityType, x.EntityId, x.Operation, x.Payload.RootElement))
             .ToListAsync(cancellationToken);
+        var changes = changeEntities.Select(x => new ServerSyncEvent(
+            x.Revision, x.EventId, x.DeviceId, x.DeviceSequence, x.HlcPhysicalMs, x.HlcLogical,
+            x.EntityType, x.EntityId, x.Operation, x.Payload.RootElement.Clone())).ToList();
         var checkpoint = changes.Count == 0 ? request.Checkpoint : changes[^1].Revision;
         await transaction.CommitAsync(cancellationToken);
         return new SyncResponse(checkpoint, accepted, changes);

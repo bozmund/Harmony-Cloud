@@ -179,8 +179,16 @@ cloud.MapGet("/playback/commands", async (Guid deviceId, HttpContext context, Ac
     var accountId = identity.Resolve(context);
     await using var db = await contexts.CreateDbContextAsync(cancellationToken);
     var now = clock.GetUtcNow();
-    var commands = await db.PlaybackCommands.Where(x => x.AccountId == accountId && x.TargetDeviceId == deviceId && x.AcknowledgedAt == null && x.ExpiresAt > now)
-        .OrderBy(x => x.CreatedAt).Select(x => new PlaybackCommandResponse(x.CommandId, x.SourceDeviceId, x.TargetDeviceId, x.Type, x.Payload.RootElement, x.ExpiresAt)).ToListAsync(cancellationToken);
+    var commandEntities = await db.PlaybackCommands.AsNoTracking()
+        .Where(x => x.AccountId == accountId && x.TargetDeviceId == deviceId && x.AcknowledgedAt == null && x.ExpiresAt > now)
+        .OrderBy(x => x.CreatedAt)
+        .ToListAsync(cancellationToken);
+    // JsonDocument.RootElement is not translatable by Npgsql. Project after
+    // materialization and clone the element so JSON serialization is not tied
+    // to the tracked entity/document lifetime.
+    var commands = commandEntities.Select(x => new PlaybackCommandResponse(
+        x.CommandId, x.SourceDeviceId, x.TargetDeviceId, x.Type,
+        x.Payload.RootElement.Clone(), x.ExpiresAt)).ToList();
     return Results.Ok(commands);
 });
 
