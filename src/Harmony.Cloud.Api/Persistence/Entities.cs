@@ -61,3 +61,14 @@ public sealed class PlaybackCommandEntity
     public DateTimeOffset? AcknowledgedAt { get; set; }
     public bool Applied { get; set; }
 }
+
+public sealed class PlaybackSessionEntity
+{
+    public required string AccountId { get; set; }
+    public Guid SessionId { get; set; }
+    public Guid TargetDeviceId { get; set; }
+    public required JsonDocument State { get; set; }
+    public long Sequence { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? EndedAt { get; set; }
+}

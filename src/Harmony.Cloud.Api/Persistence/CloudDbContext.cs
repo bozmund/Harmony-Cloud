@@ -8,6 +8,7 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
     public DbSet<SnapshotEntity> Snapshots => Set<SnapshotEntity>();
     public DbSet<DeviceEntity> Devices => Set<DeviceEntity>();
     public DbSet<PlaybackCommandEntity> PlaybackCommands => Set<PlaybackCommandEntity>();
+    public DbSet<PlaybackSessionEntity> PlaybackSessions => Set<PlaybackSessionEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -74,5 +75,17 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
         commands.Property(x => x.AcknowledgedAt).HasColumnName("acknowledged_at");
         commands.Property(x => x.Applied).HasColumnName("applied");
         commands.HasIndex(x => new { x.AccountId, x.TargetDeviceId, x.ExpiresAt });
+
+        var sessions = modelBuilder.Entity<PlaybackSessionEntity>();
+        sessions.ToTable("cloud_playback_sessions");
+        sessions.HasKey(x => new { x.AccountId, x.SessionId });
+        sessions.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
+        sessions.Property(x => x.SessionId).HasColumnName("session_id");
+        sessions.Property(x => x.TargetDeviceId).HasColumnName("target_device_id");
+        sessions.Property(x => x.State).HasColumnName("state").HasColumnType("jsonb");
+        sessions.Property(x => x.Sequence).HasColumnName("sequence");
+        sessions.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+        sessions.Property(x => x.EndedAt).HasColumnName("ended_at");
+        sessions.HasIndex(x => new { x.AccountId, x.EndedAt });
     }
 }

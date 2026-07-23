@@ -71,6 +71,12 @@ if (builder.Configuration.GetValue<bool>("RUN_MIGRATIONS"))
           acknowledged_at timestamp with time zone NULL, applied boolean NOT NULL DEFAULT false,
           PRIMARY KEY (account_id, command_id));
         CREATE INDEX IF NOT EXISTS ix_cloud_playback_commands_target_expiry ON cloud_playback_commands(account_id, target_device_id, expires_at);
+        CREATE TABLE IF NOT EXISTS cloud_playback_sessions (
+          account_id varchar(64) NOT NULL, session_id uuid NOT NULL, target_device_id uuid NOT NULL,
+          state jsonb NOT NULL, sequence bigint NOT NULL DEFAULT 0,
+          updated_at timestamp with time zone NOT NULL, ended_at timestamp with time zone NULL,
+          PRIMARY KEY (account_id, session_id));
+        CREATE INDEX IF NOT EXISTS ix_cloud_playback_sessions_active ON cloud_playback_sessions(account_id, ended_at);
         """);
     return;
 }
@@ -115,10 +121,13 @@ cloud.MapGet("/playback/devices", async (HttpContext context, AccountIdentity id
     var accountId = identity.Resolve(context);
     var connectedCutoff = clock.GetUtcNow() - TimeSpan.FromMinutes(2);
     await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var targetDeviceId = await db.PlaybackSessions.AsNoTracking()
+        .Where(x => x.AccountId == accountId && x.EndedAt == null)
+        .OrderByDescending(x => x.UpdatedAt).Select(x => (Guid?)x.TargetDeviceId).FirstOrDefaultAsync(cancellationToken);
     var devices = await db.Devices.AsNoTracking().Where(x => x.AccountId == accountId)
         .OrderBy(x => x.Name).Select(x => new PlaybackDeviceResponse(x.DeviceId, x.Name, x.Platform, x.AppVersion,
             x.IsRealtimeConnected || x.LastSeenAt >= connectedCutoff ? "online" : x.PushTokenCiphertext != null ? "background" : "unavailable",
-            x.DeviceId == currentDeviceId)).ToListAsync(cancellationToken);
+            x.DeviceId == currentDeviceId, targetDeviceId == x.DeviceId)).ToListAsync(cancellationToken);
     return Results.Ok(devices);
 });
 
@@ -206,6 +215,129 @@ cloud.MapPost("/playback/commands/{commandId:guid}/ack", async (Guid commandId, 
     return Results.NoContent();
 });
 
+cloud.MapGet("/playback/session", async (HttpContext context, AccountIdentity identity,
+    IDbContextFactory<CloudDbContext> contexts, CancellationToken cancellationToken) =>
+{
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var session = await db.PlaybackSessions.AsNoTracking()
+        .Where(x => x.AccountId == accountId && x.EndedAt == null)
+        .OrderByDescending(x => x.UpdatedAt).FirstOrDefaultAsync(cancellationToken);
+    if (session is null) return Results.NoContent();
+    return Results.Ok(new PlaybackSessionResponse(session.SessionId, session.TargetDeviceId,
+        session.Sequence, session.State.RootElement.Clone(), session.UpdatedAt));
+});
+
+cloud.MapPost("/playback/session/start", async (PlaybackSessionStartRequest request, HttpContext context,
+    AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, IHubContext<PlaybackHub> hub,
+    FcmWakeupService fcm, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    if (request.SourceDeviceId == Guid.Empty || request.TargetDeviceId == Guid.Empty ||
+        request.SourceDeviceId == request.TargetDeviceId || !IsPortablePlaybackPayload(request.State))
+        return Results.BadRequest(new { code = "invalid_playback_session" });
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var devices = await db.Devices.Where(x => x.AccountId == accountId &&
+        (x.DeviceId == request.SourceDeviceId || x.DeviceId == request.TargetDeviceId)).ToListAsync(cancellationToken);
+    if (devices.Count != 2) return Results.NotFound(new { code = "device_not_found" });
+    var now = clock.GetUtcNow();
+    var old = await db.PlaybackSessions.Where(x => x.AccountId == accountId && x.EndedAt == null).ToListAsync(cancellationToken);
+    foreach (var previous in old) previous.EndedAt = now;
+    var session = new PlaybackSessionEntity { AccountId = accountId, SessionId = Guid.NewGuid(),
+        TargetDeviceId = request.TargetDeviceId, State = JsonDocument.Parse(request.State.GetRawText()),
+        Sequence = 1, UpdatedAt = now };
+    db.PlaybackSessions.Add(session);
+    var command = new PlaybackCommandEntity { AccountId = accountId, CommandId = Guid.NewGuid(),
+        SourceDeviceId = request.SourceDeviceId, TargetDeviceId = request.TargetDeviceId, Type = "handoff",
+        Payload = JsonDocument.Parse(request.State.GetRawText()), CreatedAt = now, ExpiresAt = now.AddMinutes(1) };
+    db.PlaybackCommands.Add(command);
+    await db.SaveChangesAsync(cancellationToken);
+    await hub.Clients.Group(PlaybackHub.Group(accountId, request.TargetDeviceId)).SendAsync("playbackCommandAvailable", command.CommandId, cancellationToken);
+    var target = devices.Single(x => x.DeviceId == request.TargetDeviceId);
+    if (!target.IsRealtimeConnected) await fcm.WakeAsync(target.PushTokenCiphertext, command.CommandId, cancellationToken);
+    return Results.Accepted($"/cloud/v1/playback/session/{session.SessionId}",
+        new { sessionId = session.SessionId, commandId = command.CommandId });
+});
+
+cloud.MapPost("/playback/session/command", async (PlaybackSessionCommandRequest request, HttpContext context,
+    AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, IHubContext<PlaybackHub> hub,
+    FcmWakeupService fcm, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    if (request.SourceDeviceId == Guid.Empty || request.TargetDeviceId == Guid.Empty ||
+        string.IsNullOrWhiteSpace(request.Type) || !IsPortablePlaybackPayload(request.Payload))
+        return Results.BadRequest(new { code = "invalid_playback_command" });
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var session = await db.PlaybackSessions.FirstOrDefaultAsync(x => x.AccountId == accountId && x.EndedAt == null, cancellationToken);
+    if (session is null || session.TargetDeviceId != request.TargetDeviceId) return Results.Conflict(new { code = "session_not_active" });
+    if (!await db.Devices.AnyAsync(x => x.AccountId == accountId && x.DeviceId == request.SourceDeviceId, cancellationToken)) return Results.NotFound();
+    var now = clock.GetUtcNow();
+    session.Sequence++;
+    session.UpdatedAt = now;
+    var command = new PlaybackCommandEntity { AccountId = accountId, CommandId = Guid.NewGuid(), SourceDeviceId = request.SourceDeviceId,
+        TargetDeviceId = request.TargetDeviceId, Type = request.Type, Payload = JsonDocument.Parse(request.Payload.GetRawText()), CreatedAt = now, ExpiresAt = now.AddMinutes(1) };
+    db.PlaybackCommands.Add(command);
+    await db.SaveChangesAsync(cancellationToken);
+    await hub.Clients.Group(PlaybackHub.Group(accountId, request.TargetDeviceId)).SendAsync("playbackCommandAvailable", command.CommandId, cancellationToken);
+    var target = await db.Devices.SingleAsync(x => x.AccountId == accountId && x.DeviceId == request.TargetDeviceId, cancellationToken);
+    if (!target.IsRealtimeConnected) await fcm.WakeAsync(target.PushTokenCiphertext, command.CommandId, cancellationToken);
+    return Results.Accepted($"/cloud/v1/playback/commands/{command.CommandId}", new { commandId = command.CommandId, sequence = session.Sequence });
+});
+
+cloud.MapPost("/playback/session/state", async (PlaybackSessionStateRequest request, HttpContext context,
+    AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    if (request.DeviceId == Guid.Empty || !IsPortablePlaybackPayload(request.State)) return Results.BadRequest();
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var session = await db.PlaybackSessions.FirstOrDefaultAsync(x => x.AccountId == accountId && x.EndedAt == null && x.TargetDeviceId == request.DeviceId, cancellationToken);
+    if (session is null) return Results.NotFound();
+    session.Sequence++;
+    session.State = JsonDocument.Parse(request.State.GetRawText());
+    session.UpdatedAt = clock.GetUtcNow();
+    await db.SaveChangesAsync(cancellationToken);
+    return Results.Ok(new { sequence = session.Sequence });
+});
+
+cloud.MapPost("/playback/session/target", async (PlaybackSessionTargetRequest request, HttpContext context,
+    AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, IHubContext<PlaybackHub> hub,
+    FcmWakeupService fcm, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    if (request.SourceDeviceId == Guid.Empty || request.TargetDeviceId == Guid.Empty || !IsPortablePlaybackPayload(request.State))
+        return Results.BadRequest(new { code = "invalid_playback_target" });
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var session = await db.PlaybackSessions.FirstOrDefaultAsync(x => x.AccountId == accountId && x.EndedAt == null, cancellationToken);
+    if (session is null) return Results.NotFound(new { code = "session_not_active" });
+    if (!await db.Devices.AnyAsync(x => x.AccountId == accountId && x.DeviceId == request.SourceDeviceId, cancellationToken) ||
+        !await db.Devices.AnyAsync(x => x.AccountId == accountId && x.DeviceId == request.TargetDeviceId, cancellationToken))
+        return Results.NotFound(new { code = "device_not_found" });
+    var now = clock.GetUtcNow();
+    session.TargetDeviceId = request.TargetDeviceId;
+    session.Sequence++;
+    session.State = JsonDocument.Parse(request.State.GetRawText());
+    session.UpdatedAt = now;
+    var command = new PlaybackCommandEntity { AccountId = accountId, CommandId = Guid.NewGuid(), SourceDeviceId = request.SourceDeviceId,
+        TargetDeviceId = request.TargetDeviceId, Type = "handoff", Payload = JsonDocument.Parse(request.State.GetRawText()), CreatedAt = now, ExpiresAt = now.AddMinutes(1) };
+    db.PlaybackCommands.Add(command);
+    await db.SaveChangesAsync(cancellationToken);
+    await hub.Clients.Group(PlaybackHub.Group(accountId, request.TargetDeviceId)).SendAsync("playbackCommandAvailable", command.CommandId, cancellationToken);
+    var target = await db.Devices.SingleAsync(x => x.AccountId == accountId && x.DeviceId == request.TargetDeviceId, cancellationToken);
+    if (!target.IsRealtimeConnected) await fcm.WakeAsync(target.PushTokenCiphertext, command.CommandId, cancellationToken);
+    return Results.Accepted((string?)null, new { commandId = command.CommandId, sequence = session.Sequence });
+});
+
+cloud.MapDelete("/playback/session", async (HttpContext context, AccountIdentity identity,
+    IDbContextFactory<CloudDbContext> contexts, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var sessions = await db.PlaybackSessions.Where(x => x.AccountId == accountId && x.EndedAt == null).ToListAsync(cancellationToken);
+    foreach (var session in sessions) session.EndedAt = clock.GetUtcNow();
+    await db.SaveChangesAsync(cancellationToken);
+    return Results.NoContent();
+});
+
 cloud.MapPost("/sync", async (
     SyncRequest request, HttpContext context, AccountIdentity identity,
     SyncService sync, CancellationToken cancellationToken) =>
@@ -255,6 +387,7 @@ cloud.MapDelete("/account", async (
     await db.SyncEvents.Where(x => x.AccountId == accountId).ExecuteDeleteAsync(cancellationToken);
     await db.Devices.Where(x => x.AccountId == accountId).ExecuteDeleteAsync(cancellationToken);
     await db.PlaybackCommands.Where(x => x.AccountId == accountId).ExecuteDeleteAsync(cancellationToken);
+    await db.PlaybackSessions.Where(x => x.AccountId == accountId).ExecuteDeleteAsync(cancellationToken);
     await transaction.CommitAsync(cancellationToken);
     return Results.NoContent();
 });
@@ -265,7 +398,9 @@ app.Run();
 
 static bool IsPortablePlaybackPayload(JsonElement payload)
 {
-    if (payload.GetRawText().Length > 64 * 1024) return false;
+    // Queue metadata can legitimately contain hundreds of songs. It remains
+    // sanitized and bounded, but must not be confused with audio/file data.
+    if (payload.GetRawText().Length > 1024 * 1024) return false;
     return !ContainsForbiddenKey(payload);
 }
 
