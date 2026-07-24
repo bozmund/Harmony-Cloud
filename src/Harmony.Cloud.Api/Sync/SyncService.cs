@@ -1,5 +1,8 @@
 using System.Text.Json;
+using Harmony.Cloud.Api.Abstractions;
 using Harmony.Cloud.Api.Configuration;
+using Harmony.Cloud.Api.Diagnostics;
+using Harmony.Cloud.Api.Domain;
 using Harmony.Cloud.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -8,7 +11,8 @@ namespace Harmony.Cloud.Api.Sync;
 public sealed class SyncService(
     IDbContextFactory<CloudDbContext> contexts,
     CloudOptions options,
-    TimeProvider clock)
+    TimeProvider clock,
+    CloudMetrics metrics) : ISyncService
 {
     public async Task<SyncResponse> SyncAsync(
         string accountId, SyncRequest request, CancellationToken cancellationToken)
@@ -40,7 +44,7 @@ public sealed class SyncService(
                 throw new InvalidDataException("device_sequence_replayed");
 
             var physical = Math.Min(incoming.HlcPhysicalMs, now.AddMinutes(5).ToUnixTimeMilliseconds());
-            var payload = JsonDocument.Parse(incoming.Payload.GetRawText());
+            var payload = SyncPayloadPolicy.Normalize(incoming.EntityType, incoming.EntityId, incoming.Payload);
             var entity = new SyncEventEntity
             {
                 AccountId = accountId,
@@ -76,6 +80,7 @@ public sealed class SyncService(
             x.EntityType, x.EntityId, x.Operation, x.Payload.RootElement.Clone())).ToList();
         var checkpoint = changes.Count == 0 ? request.Checkpoint : changes[^1].Revision;
         await transaction.CommitAsync(cancellationToken);
+        metrics.RecordAcceptedSyncEvents(accepted.Count);
         return new SyncResponse(checkpoint, accepted, changes);
     }
 

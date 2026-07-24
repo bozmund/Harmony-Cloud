@@ -67,8 +67,21 @@ public sealed class PlaybackSessionEntity
     public required string AccountId { get; set; }
     public Guid SessionId { get; set; }
     public Guid TargetDeviceId { get; set; }
+    /// <summary>
+    /// Durable session state: ordered <c>queueIds</c>, index, and modes. Written only when it
+    /// actually changes, guarded by <c>queueRevision</c> inside the document.
+    /// </summary>
     public required JsonDocument State { get; set; }
     public long Sequence { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
+
+    // Ephemeral playback progress. Broadcast over the socket on every tick and persisted only
+    // periodically (see PlaybackSocketEndpoint.ProgressPersistInterval) so a device that joins late
+    // still opens on a sensible position instead of zero.
+    public string? CurrentSongId { get; set; }
+    public long PositionMs { get; set; }
+    public long? DurationMs { get; set; }
+    public bool Playing { get; set; }
+    public DateTimeOffset? ProgressUpdatedAt { get; set; }
 }

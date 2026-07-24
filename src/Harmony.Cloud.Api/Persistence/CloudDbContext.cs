@@ -86,6 +86,11 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
         sessions.Property(x => x.Sequence).HasColumnName("sequence");
         sessions.Property(x => x.UpdatedAt).HasColumnName("updated_at");
         sessions.Property(x => x.EndedAt).HasColumnName("ended_at");
+        sessions.Property(x => x.CurrentSongId).HasColumnName("current_song_id").HasMaxLength(64);
+        sessions.Property(x => x.PositionMs).HasColumnName("position_ms");
+        sessions.Property(x => x.DurationMs).HasColumnName("duration_ms");
+        sessions.Property(x => x.Playing).HasColumnName("playing");
+        sessions.Property(x => x.ProgressUpdatedAt).HasColumnName("progress_updated_at");
         sessions.HasIndex(x => new { x.AccountId, x.EndedAt });
     }
 }

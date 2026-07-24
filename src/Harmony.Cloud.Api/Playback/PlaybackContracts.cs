@@ -13,4 +13,19 @@ public sealed record PlaybackSessionStartRequest(Guid SourceDeviceId, Guid Targe
 public sealed record PlaybackSessionCommandRequest(Guid SourceDeviceId, Guid TargetDeviceId, string Type, JsonElement Payload);
 public sealed record PlaybackSessionStateRequest(Guid DeviceId, JsonElement State);
 public sealed record PlaybackSessionTargetRequest(Guid SourceDeviceId, Guid TargetDeviceId, JsonElement State);
-public sealed record PlaybackSessionResponse(Guid SessionId, Guid TargetDeviceId, long Sequence, JsonElement State, DateTimeOffset UpdatedAt);
+/// <param name="State">Durable v2 state: ordered queueIds, index, and modes.</param>
+/// <param name="PositionMs">
+/// Last persisted progress. Only periodically written (live progress arrives over the socket), so a
+/// device that joins mid-session opens on a sensible position rather than zero.
+/// </param>
+public sealed record PlaybackSessionResponse(
+    Guid SessionId,
+    Guid TargetDeviceId,
+    long Sequence,
+    JsonElement State,
+    DateTimeOffset UpdatedAt,
+    string? CurrentSongId = null,
+    long PositionMs = 0,
+    long? DurationMs = null,
+    bool Playing = false,
+    DateTimeOffset? ProgressUpdatedAt = null);
