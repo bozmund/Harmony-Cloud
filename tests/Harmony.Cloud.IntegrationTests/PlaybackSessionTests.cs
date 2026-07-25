@@ -29,6 +29,34 @@ public sealed class PlaybackSessionTests(CloudApiFixture fixture)
     }
 
     [Fact]
+    public async Task Session_start_seeds_progress_from_the_handed_off_state()
+    {
+        // A handoff made at 0:07 must read as 0:07 (and playing) from the very
+        // first snapshot — the progress columns must not sit at 0 / paused
+        // until the target's first write.
+        var account = TestAccount.New(fixture);
+        var (source, target) = await account.RegisterTwoDevicesAsync();
+        var state = JsonSerializer.SerializeToElement(new
+        {
+            schemaVersion = 2,
+            queueIds = new[] { "aaaaaaaaaaa" },
+            index = 0,
+            currentSongId = "aaaaaaaaaaa",
+            queueRevision = 1,
+            positionMs = 7_000,
+            playing = true
+        });
+
+        var started = await account.StartSessionAsync(source, target, state);
+        Assert.Equal(HttpStatusCode.Accepted, started.StatusCode);
+
+        var session = (await account.GetSessionAsync())!.Value;
+        Assert.Equal(7_000, session.GetProperty("positionMs").GetInt64());
+        Assert.True(session.GetProperty("playing").GetBoolean());
+        Assert.Equal("aaaaaaaaaaa", session.GetProperty("currentSongId").GetString());
+    }
+
+    [Fact]
     public async Task Only_one_session_is_active_per_account()
     {
         var account = TestAccount.New(fixture);

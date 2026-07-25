@@ -61,6 +61,27 @@ public static class PlaybackSessionState
     }
 
     /// <summary>
+    /// Seeds a session's persisted progress from the state document that started (or retargeted)
+    /// it. A brand-new session's progress columns otherwise sit at 0 / paused until the target's
+    /// first write, so every read during the handoff window claimed the song was at 0:00 and not
+    /// playing — a handoff made at 0:07 must read as 0:07 from the first snapshot onwards.
+    /// </summary>
+    public static void SeedProgress(Persistence.PlaybackSessionEntity session, JsonElement state, DateTimeOffset now)
+    {
+        session.CurrentSongId =
+            state.TryGetProperty("currentSongId", out var song) && song.ValueKind == JsonValueKind.String
+                ? song.GetString()
+                : null;
+        session.PositionMs =
+            state.TryGetProperty("positionMs", out var position) && position.ValueKind == JsonValueKind.Number
+                ? position.GetInt64()
+                : 0;
+        session.DurationMs = null;
+        session.Playing = state.TryGetProperty("playing", out var playing) && playing.ValueKind == JsonValueKind.True;
+        session.ProgressUpdatedAt = now;
+    }
+
+    /// <summary>
     /// Monotonic revision of the queue itself. Lets a device tell "the queue changed" from "only the
     /// position moved", so it can skip re-resolving metadata it already holds.
     /// </summary>

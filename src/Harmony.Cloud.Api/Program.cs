@@ -289,6 +289,7 @@ cloud.MapPost("/playback/session/start", async (PlaybackSessionStartRequest requ
         Sequence = 1,
         UpdatedAt = now
     };
+    PlaybackSessionState.SeedProgress(session, request.State, now);
     db.PlaybackSessions.Add(session);
     var command = new PlaybackCommandEntity
     {
@@ -418,10 +419,9 @@ cloud.MapPost("/playback/session/target", async (PlaybackSessionTargetRequest re
     session.Sequence++;
     session.State = JsonDocument.Parse(request.State.GetRawText());
     session.UpdatedAt = now;
-    // Persisted progress belonged to the previous target. Clear it so a device reading the snapshot
-    // during the handoff does not show the old device's position against the new target.
-    session.Playing = false;
-    session.ProgressUpdatedAt = null;
+    // Persisted progress belonged to the previous target; re-seed it from the handed-off state so
+    // readers see the position the handoff was made at rather than the old device's or zero.
+    PlaybackSessionState.SeedProgress(session, request.State, now);
     var command = new PlaybackCommandEntity
     {
         AccountId = accountId,
