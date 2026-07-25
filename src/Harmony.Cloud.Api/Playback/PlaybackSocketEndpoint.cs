@@ -69,7 +69,8 @@ public static class PlaybackSocketEndpoint
         var connection = registry.Add(accountId, deviceId, socket);
         try
         {
-            await SendSnapshotAsync(registry, contexts, accountId, deviceId, context.RequestAborted);
+            await SendSnapshotAsync(
+                registry, contexts, clock, accountId, deviceId, context.RequestAborted);
             await ReadLoopAsync(socket, registry, contexts, clock, accountId, deviceId, logger, context.RequestAborted);
         }
         catch (OperationCanceledException) { }
@@ -84,17 +85,34 @@ public static class PlaybackSocketEndpoint
 
     private static async Task SendSnapshotAsync(
         PlaybackConnectionRegistry registry, IDbContextFactory<CloudDbContext> contexts,
-        string accountId, Guid deviceId, CancellationToken cancellationToken)
+        TimeProvider clock, string accountId, Guid deviceId, CancellationToken cancellationToken)
     {
         await using var db = await contexts.CreateDbContextAsync(cancellationToken);
         var session = await db.PlaybackSessions.AsNoTracking()
             .Where(x => x.AccountId == accountId && x.EndedAt == null)
             .OrderByDescending(x => x.UpdatedAt)
             .FirstOrDefaultAsync(cancellationToken);
-        if (session is null) return;
-        await registry.SendAsync(accountId, deviceId, new SessionSnapshotFrame(
-            session.SessionId, session.TargetDeviceId, session.Sequence,
-            session.State.RootElement.Clone(), session.UpdatedAt), cancellationToken);
+        if (session is not null)
+        {
+            await registry.SendAsync(
+                accountId, deviceId, SessionSnapshotFrame.From(session), cancellationToken);
+        }
+
+        // Replay anything queued while this device had no socket. A push to a device that was not
+        // connected reaches nobody, and Windows has no FCM to be woken by — without this, a command
+        // created in that window is lost for good and the handoff silently does nothing.
+        var now = clock.GetUtcNow();
+        var pending = await db.PlaybackCommands.AsNoTracking()
+            .Where(x => x.AccountId == accountId && x.TargetDeviceId == deviceId
+                        && x.AcknowledgedAt == null && x.ExpiresAt > now)
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(cancellationToken);
+        foreach (var command in pending)
+        {
+            await registry.SendAsync(accountId, deviceId, new CommandFrame(
+                command.CommandId, command.SourceDeviceId, command.TargetDeviceId, command.Type,
+                command.Payload.RootElement.Clone(), command.ExpiresAt), cancellationToken);
+        }
     }
 
     private static async Task ReadLoopAsync(

@@ -118,6 +118,11 @@ if (app.Environment.IsDevelopment())
     });
 }
 
+// How long an unacknowledged playback command stays deliverable. One minute was sized for the old
+// one-second poll; delivery is now push-only, so a target that is asleep or reconnecting needs a
+// window wide enough to come back and drain it.
+var PlaybackCommandLifetime = TimeSpan.FromMinutes(5);
+
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/cloud/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", async (ReadinessProbe probe, CancellationToken cancellationToken) =>
@@ -186,7 +191,7 @@ cloud.MapPost("/playback/commands", async (PlaybackCommandRequest request, HttpC
         Type = request.Type,
         Payload = JsonDocument.Parse(request.Payload.GetRawText()),
         CreatedAt = now,
-        ExpiresAt = now.AddMinutes(1)
+        ExpiresAt = now + PlaybackCommandLifetime
     };
     db.PlaybackCommands.Add(command);
     await db.SaveChangesAsync(cancellationToken);
@@ -294,7 +299,7 @@ cloud.MapPost("/playback/session/start", async (PlaybackSessionStartRequest requ
         Type = "handoff",
         Payload = JsonDocument.Parse(request.State.GetRawText()),
         CreatedAt = now,
-        ExpiresAt = now.AddMinutes(1)
+        ExpiresAt = now + PlaybackCommandLifetime
     };
     db.PlaybackCommands.Add(command);
     await db.SaveChangesAsync(cancellationToken);
@@ -303,9 +308,7 @@ cloud.MapPost("/playback/session/start", async (PlaybackSessionStartRequest requ
         command.CommandId, command.SourceDeviceId, command.TargetDeviceId, command.Type,
         command.Payload.RootElement.Clone(), command.ExpiresAt), cancellationToken);
     // Everyone else needs to know a session now exists and who owns the audio.
-    await sockets.BroadcastAsync(accountId, new SessionSnapshotFrame(
-        session.SessionId, session.TargetDeviceId, session.Sequence,
-        session.State.RootElement.Clone(), session.UpdatedAt),
+    await sockets.BroadcastAsync(accountId, SessionSnapshotFrame.From(session),
         exceptDeviceId: request.TargetDeviceId, cancellationToken);
     var target = devices.Single(x => x.DeviceId == request.TargetDeviceId);
     // FCM is now purely a "wake up and open your socket" nudge for a backgrounded device.
@@ -343,7 +346,7 @@ cloud.MapPost("/playback/session/command", async (PlaybackSessionCommandRequest 
         Type = request.Type,
         Payload = JsonDocument.Parse(request.Payload.GetRawText()),
         CreatedAt = now,
-        ExpiresAt = now.AddMinutes(1)
+        ExpiresAt = now + PlaybackCommandLifetime
     };
     db.PlaybackCommands.Add(command);
     await db.SaveChangesAsync(cancellationToken);
@@ -385,9 +388,7 @@ cloud.MapPost("/playback/session/state", async (PlaybackSessionStateRequest requ
     session.State = JsonDocument.Parse(request.State.GetRawText());
     session.UpdatedAt = clock.GetUtcNow();
     await db.SaveChangesAsync(cancellationToken);
-    await sockets.BroadcastAsync(accountId, new SessionSnapshotFrame(
-        session.SessionId, session.TargetDeviceId, session.Sequence,
-        session.State.RootElement.Clone(), session.UpdatedAt),
+    await sockets.BroadcastAsync(accountId, SessionSnapshotFrame.From(session),
         exceptDeviceId: request.DeviceId, cancellationToken);
     return Results.Ok(new { sequence = session.Sequence, applied = true });
 });
@@ -430,7 +431,7 @@ cloud.MapPost("/playback/session/target", async (PlaybackSessionTargetRequest re
         Type = "handoff",
         Payload = JsonDocument.Parse(request.State.GetRawText()),
         CreatedAt = now,
-        ExpiresAt = now.AddMinutes(1)
+        ExpiresAt = now + PlaybackCommandLifetime
     };
     db.PlaybackCommands.Add(command);
     await db.SaveChangesAsync(cancellationToken);
@@ -439,9 +440,7 @@ cloud.MapPost("/playback/session/target", async (PlaybackSessionTargetRequest re
         command.CommandId, command.SourceDeviceId, command.TargetDeviceId, command.Type,
         command.Payload.RootElement.Clone(), command.ExpiresAt), cancellationToken);
     // Everyone else must learn that the audio target moved, including the device that just lost it.
-    await sockets.BroadcastAsync(accountId, new SessionSnapshotFrame(
-        session.SessionId, session.TargetDeviceId, session.Sequence,
-        session.State.RootElement.Clone(), session.UpdatedAt),
+    await sockets.BroadcastAsync(accountId, SessionSnapshotFrame.From(session),
         exceptDeviceId: request.TargetDeviceId, cancellationToken);
     var target = await db.Devices.SingleAsync(x => x.AccountId == accountId && x.DeviceId == request.TargetDeviceId,
         cancellationToken);

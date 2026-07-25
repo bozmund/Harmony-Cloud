@@ -22,15 +22,29 @@ public static class PlaybackFrameTypes
     public const string Ping = "ping";
 }
 
+/// <param name="PositionMs">
+/// Last persisted progress. Carried on the snapshot because a device joining mid-session must be
+/// able to start at the right position and, crucially, know whether it should be playing — without
+/// it the only <c>playing</c> signal is whatever happened to be embedded in the state document.
+/// </param>
 public sealed record SessionSnapshotFrame(
     Guid SessionId,
     Guid TargetDeviceId,
     long Sequence,
     JsonElement State,
-    DateTimeOffset UpdatedAt)
+    DateTimeOffset UpdatedAt,
+    string? CurrentSongId = null,
+    long PositionMs = 0,
+    long? DurationMs = null,
+    bool Playing = false)
 {
     [JsonPropertyOrder(-1)]
     public string Type => PlaybackFrameTypes.SessionSnapshot;
+
+    public static SessionSnapshotFrame From(Persistence.PlaybackSessionEntity session) => new(
+        session.SessionId, session.TargetDeviceId, session.Sequence,
+        session.State.RootElement.Clone(), session.UpdatedAt,
+        session.CurrentSongId, session.PositionMs, session.DurationMs, session.Playing);
 }
 
 /// <param name="PublishedAtMs">

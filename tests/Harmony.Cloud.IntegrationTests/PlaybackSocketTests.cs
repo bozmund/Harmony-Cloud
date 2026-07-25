@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -59,6 +60,82 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
     }
 
     [Fact]
+    public async Task A_command_created_while_the_target_was_offline_is_replayed_on_connect()
+    {
+        // The regression that broke handoff: a push to a device with no socket reaches nobody, and
+        // Windows has no FCM to be woken by. Without replay the command is lost for good.
+        var account = TestAccount.New(fixture);
+        var (source, target) = await account.RegisterTwoDevicesAsync();
+        await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
+
+        // The target never connected while the session started, so it missed the handoff push.
+        using var socket = await ConnectAsync(account, target);
+
+        var snapshot = await ReceiveAsync(socket);
+        Assert.Equal("sessionSnapshot", snapshot.GetProperty("type").GetString());
+        var replayed = await ReceiveAsync(socket);
+        Assert.Equal("command", replayed.GetProperty("type").GetString());
+        Assert.Equal("handoff", replayed.GetProperty("commandType").GetString());
+    }
+
+    [Fact]
+    public async Task An_acknowledged_command_is_not_replayed_again()
+    {
+        var account = TestAccount.New(fixture);
+        var (source, target) = await account.RegisterTwoDevicesAsync();
+        await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
+
+        using (var first = await ConnectAsync(account, target))
+        {
+            await ReceiveAsync(first); // snapshot
+            var command = await ReceiveAsync(first);
+            await SendAsync(first, new
+            {
+                type = "ack",
+                commandId = command.GetProperty("commandId").GetGuid(),
+                applied = true,
+            });
+            await WaitForNoPendingCommandsAsync(account, target);
+        }
+
+        using var second = await ConnectAsync(account, target);
+        var snapshot = await ReceiveAsync(second);
+        Assert.Equal("sessionSnapshot", snapshot.GetProperty("type").GetString());
+        await Assert.ThrowsAnyAsync<Exception>(() => ReceiveWithinAsync(second, TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task The_snapshot_carries_persisted_progress_so_a_late_joiner_can_resume()
+    {
+        var account = TestAccount.New(fixture);
+        var (source, target) = await account.RegisterTwoDevicesAsync();
+        await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
+
+        using (var audioTarget = await ConnectTargetAsync(account, target))
+        {
+            await SendAsync(audioTarget, new
+            {
+                type = "progress",
+                currentSongId = "aaaaaaaaaaa",
+                positionMs = 42_000,
+                durationMs = 213_000,
+                playing = true,
+                speed = 1.0,
+                publishedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            });
+            await WaitForAsync(account, x => x.GetProperty("positionMs").GetInt64() == 42_000);
+        }
+
+        using var controller = await ConnectAsync(account, source);
+        var snapshot = await ReceiveAsync(controller);
+
+        Assert.Equal("aaaaaaaaaaa", snapshot.GetProperty("currentSongId").GetString());
+        Assert.Equal(42_000, snapshot.GetProperty("positionMs").GetInt64());
+        Assert.Equal(213_000, snapshot.GetProperty("durationMs").GetInt64());
+        Assert.True(snapshot.GetProperty("playing").GetBoolean());
+    }
+
+    [Fact]
     public async Task A_command_arrives_on_the_targets_socket_with_its_payload_inline()
     {
         // The whole point of replacing the hub: no notify-then-fetch round trip.
@@ -66,8 +143,7 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
         var (source, target) = await account.RegisterTwoDevicesAsync();
         await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
 
-        using var socket = await ConnectAsync(account, target);
-        await ReceiveAsync(socket); // snapshot
+        using var socket = await ConnectTargetAsync(account, target);
 
         await account.PostAsync("playback/session/command", new
         {
@@ -92,8 +168,7 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
 
         using var controller = await ConnectAsync(account, source);
         await ReceiveAsync(controller); // snapshot
-        using var audioTarget = await ConnectAsync(account, target);
-        await ReceiveAsync(audioTarget); // snapshot
+        using var audioTarget = await ConnectTargetAsync(account, target);
 
         await SendAsync(audioTarget, new
         {
@@ -120,8 +195,7 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
         var (source, target) = await account.RegisterTwoDevicesAsync();
         await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
 
-        using var audioTarget = await ConnectAsync(account, target);
-        await ReceiveAsync(audioTarget); // snapshot
+        using var audioTarget = await ConnectTargetAsync(account, target);
         await SendAsync(audioTarget, new
         {
             type = "progress",
@@ -187,8 +261,7 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
         var (source, target) = await account.RegisterTwoDevicesAsync();
         await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]));
 
-        using var socket = await ConnectAsync(account, target);
-        await ReceiveAsync(socket); // snapshot
+        using var socket = await ConnectTargetAsync(account, target);
 
         await socket.SendAsync(Encoding.UTF8.GetBytes("{not json"), WebSocketMessageType.Text, true, CancellationToken.None);
         await SendAsync(socket, new { type = "ping" });
@@ -240,12 +313,25 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
         JsonSerializer.SerializeToUtf8Bytes(frame, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
         WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
 
-    private static async Task<JsonElement> ReceiveAsync(WebSocket socket)
+    private static Task<JsonElement> ReceiveAsync(WebSocket socket) =>
+        ReceiveWithinAsync(socket, ReceiveTimeout);
+
+    private static async Task<JsonElement> ReceiveWithinAsync(WebSocket socket, TimeSpan timeout)
     {
-        using var timeout = new CancellationTokenSource(ReceiveTimeout);
+        using var cancellation = new CancellationTokenSource(timeout);
         var buffer = new byte[16 * 1024];
-        var received = await socket.ReceiveAsync(buffer, timeout.Token);
+        var received = await socket.ReceiveAsync(buffer, cancellation.Token);
         return JsonDocument.Parse(buffer.AsMemory(0, received.Count)).RootElement.Clone();
+    }
+
+    /// Connects as the audio target and consumes the snapshot plus the handoff the server replays
+    /// for a device that was not connected when the session started.
+    private async Task<WebSocket> ConnectTargetAsync(TestAccount account, Guid deviceId)
+    {
+        var socket = await ConnectAsync(account, deviceId);
+        await ReceiveAsync(socket);
+        await ReceiveAsync(socket);
+        return socket;
     }
 
     private static async Task WaitForSocketClosureAsync(WebSocket socket)
@@ -253,6 +339,21 @@ public sealed class PlaybackSocketTests(CloudApiFixture fixture)
         var buffer = new byte[1];
         using var timeout = new CancellationTokenSource(ReceiveTimeout);
         await Assert.ThrowsAnyAsync<Exception>(() => socket.ReceiveAsync(buffer, timeout.Token));
+    }
+
+    /// The ack travels over the socket and commits asynchronously, so wait for it to land before
+    /// asserting on what a later connection is replayed.
+    private static async Task WaitForNoPendingCommandsAsync(TestAccount account, Guid deviceId)
+    {
+        var deadline = DateTime.UtcNow + ReceiveTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var pending = await account.Client.GetFromJsonAsync<JsonElement>(
+                TestAccount.Route($"playback/commands?deviceId={deviceId}"));
+            if (pending.GetArrayLength() == 0) return;
+            await Task.Delay(100);
+        }
+        throw new TimeoutException("The command was never acknowledged.");
     }
 
     /// Progress persistence is asynchronous relative to the socket send, so poll briefly.
