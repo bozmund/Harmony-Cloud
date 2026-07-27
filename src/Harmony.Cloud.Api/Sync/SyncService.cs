@@ -52,9 +52,12 @@ public sealed class SyncService(
                 accepted.Add(incoming.EventId);
                 continue;
             }
-            if (incoming.DeviceSequence <= device.LastSequence)
-                throw new InvalidDataException("device_sequence_replayed");
-
+            // A device sequence that goes backwards is tolerated rather than rejected. It happens
+            // legitimately whenever a device rebuilds its local sync state — a storage-layout
+            // change, a restore — while the server still remembers the old high-water mark, and
+            // failing the batch wedges that device forever with no way back. Genuine duplicates are
+            // already caught above by the unique event id, and nothing downstream orders on this:
+            // the log orders by revision and state conflicts resolve on the hybrid clock.
             var physical = Math.Min(incoming.HlcPhysicalMs, now.AddMinutes(5).ToUnixTimeMilliseconds());
             var payload = SyncPayloadPolicy.Normalize(incoming.EntityType, incoming.EntityId, incoming.Payload);
             var entity = new SyncEventEntity
@@ -74,7 +77,7 @@ public sealed class SyncService(
             events.Add(entity);
             await db.SaveChangesAsync(cancellationToken);
             await projector.ApplyAsync(db, domain, entity, cancellationToken);
-            device.LastSequence = incoming.DeviceSequence;
+            device.LastSequence = Math.Max(device.LastSequence, incoming.DeviceSequence);
             accepted.Add(incoming.EventId);
         }
 

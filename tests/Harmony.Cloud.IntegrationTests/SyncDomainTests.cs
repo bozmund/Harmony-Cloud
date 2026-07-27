@@ -93,6 +93,49 @@ public sealed class SyncDomainTests(CloudApiFixture fixture)
     }
 
     [Fact]
+    public async Task A_device_that_rebuilt_its_local_state_may_restart_its_sequence()
+    {
+        // Wiping server storage does not wipe the device's remembered high-water mark, so a
+        // device that rebuilds its own sync state legitimately sends low sequences again.
+        // Rejecting those wedged the device with no way back.
+        var account = TestAccount.New(fixture);
+        var device = await account.RegisterDeviceAsync("Harmony Android", "android");
+
+        await SyncAsync(account, device, 0,
+            Event(device, 40, "favourites", EntityId("LIBFAV", VideoId), Song("Kamikaza")));
+
+        var rewound = await SyncAsync(account, device, 0,
+            Event(device, 1, "settings", EntityId("AppPrefs", "volume"), Json(new { })));
+
+        Assert.Equal(HttpStatusCode.OK, rewound.StatusCode);
+        var body = await ReadAsync(rewound);
+        Assert.Equal(1, body.GetProperty("acceptedEventIds").GetArrayLength());
+
+        await using var db = await OpenDbAsync();
+        var accountId = await AccountIdAsync(db, device);
+        Assert.Equal(1, await db.Settings.CountAsync(x => x.AccountId == accountId));
+        // The high-water mark still only ever moves forward.
+        Assert.Equal(40, (await db.Devices.SingleAsync(x => x.DeviceId == device)).LastSequence);
+    }
+
+    [Fact]
+    public async Task Resending_the_same_event_id_stores_it_once()
+    {
+        // Duplicate protection rests on the unique event id, not on the device sequence.
+        var account = TestAccount.New(fixture);
+        var device = await account.RegisterDeviceAsync("Harmony Windows", "windows");
+        var duplicate = Event(device, 1, "favourites", EntityId("LIBFAV", VideoId), Song("Kamikaza"));
+
+        await SyncAsync(account, device, 0, duplicate);
+        var again = await SyncAsync(account, device, 0, duplicate);
+
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+        await using var db = await OpenDbAsync();
+        var accountId = await AccountIdAsync(db, device);
+        Assert.Equal(1, await db.Events(SyncDomain.Favourites).CountAsync(x => x.AccountId == accountId));
+    }
+
+    [Fact]
     public async Task Changes_come_back_in_strict_revision_order_across_domain_tables()
     {
         var account = TestAccount.New(fixture);
