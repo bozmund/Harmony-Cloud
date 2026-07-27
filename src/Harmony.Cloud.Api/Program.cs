@@ -1,4 +1,3 @@
-using Harmony.Cloud.Api.Audio;
 using Harmony.Cloud.Api.Abstractions;
 using Harmony.Cloud.Api.Configuration;
 using Harmony.Cloud.Api.Domain;
@@ -31,7 +30,6 @@ builder.Services.AddSingleton<FcmWakeupService>();
 builder.Services.AddSingleton<CloudMetrics>();
 builder.Services.AddSingleton<ReadinessProbe>();
 builder.Services.AddScoped<ISyncService, SyncService>();
-builder.Services.AddHttpClient<ResolverBackupClient>();
 builder.Services.AddPooledDbContextFactory<CloudDbContext>(db =>
     db.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSql")
                  ?? throw new InvalidOperationException("PostgreSql connection is required.")));
@@ -133,7 +131,6 @@ app.MapPrometheusScrapingEndpoint("/metrics");
 var cloud = app.MapGroup("/cloud/v1");
 if (authEnabled) cloud.RequireAuthorization();
 cloud.MapSyncEndpoints();
-cloud.MapAudioEndpoints();
 cloud.MapAccountEndpoints();
 cloud.MapDeviceEndpoints();
 

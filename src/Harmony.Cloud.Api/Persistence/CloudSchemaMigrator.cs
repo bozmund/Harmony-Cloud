@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Harmony.Cloud.Api.Domain;
 
 namespace Harmony.Cloud.Api.Persistence;
 
@@ -15,7 +14,6 @@ public static class CloudSchemaMigrator
         // installations can adopt migrations without replaying the initial CreateTable calls.
         await BaselineLegacySchemaAsync(db, cancellationToken);
         await db.Database.MigrateAsync(cancellationToken);
-        await RedactExistingSongMetadataAsync(db, cancellationToken);
     }
 
     private static Task BaselineLegacySchemaAsync(CloudDbContext db, CancellationToken cancellationToken)
@@ -37,31 +35,5 @@ public static class CloudSchemaMigrator
             """;
 
         return db.Database.ExecuteSqlRawAsync(sql, [InitialMigrationId, EfCoreProductVersion], cancellationToken);
-    }
-
-    private static async Task RedactExistingSongMetadataAsync(CloudDbContext db, CancellationToken cancellationToken)
-    {
-        var events = await db.SyncEvents.OrderBy(item => item.Revision).ToListAsync(cancellationToken);
-        foreach (var item in events)
-            ReplaceWithNormalizedPayload(item.EntityType, item.EntityId, item.Payload, payload => item.Payload = payload);
-
-        var snapshots = await db.Snapshots.ToListAsync(cancellationToken);
-        foreach (var item in snapshots)
-            ReplaceWithNormalizedPayload(item.EntityType, item.EntityId, item.Payload, payload => item.Payload = payload);
-
-        await db.SaveChangesAsync(cancellationToken);
-    }
-
-    private static void ReplaceWithNormalizedPayload(string entityType, string entityId, System.Text.Json.JsonDocument current,
-        Action<System.Text.Json.JsonDocument> replace)
-    {
-        var normalized = SyncPayloadPolicy.Normalize(entityType, entityId, current.RootElement);
-        if (string.Equals(current.RootElement.GetRawText(), normalized.RootElement.GetRawText(), StringComparison.Ordinal))
-        {
-            normalized.Dispose();
-            return;
-        }
-        current.Dispose();
-        replace(normalized);
     }
 }
