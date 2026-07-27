@@ -1,48 +1,160 @@
+using Harmony.Cloud.Api.Domain;
 using Microsoft.EntityFrameworkCore;
 
 namespace Harmony.Cloud.Api.Persistence;
 
 public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : DbContext(options)
 {
-    public DbSet<SyncEventEntity> SyncEvents => Set<SyncEventEntity>();
-    public DbSet<SnapshotEntity> Snapshots => Set<SnapshotEntity>();
+    /// <summary>
+    /// Every per-domain event table draws from one sequence, so <c>revision</c> stays globally
+    /// monotonic across domains. That is what lets a device keep a single <c>checkpoint</c> number
+    /// and ask for "everything after N" even though the log is physically split.
+    /// </summary>
+    public const string RevisionSequence = "cloud_revision_seq";
+
     public DbSet<DeviceEntity> Devices => Set<DeviceEntity>();
     public DbSet<PlaybackCommandEntity> PlaybackCommands => Set<PlaybackCommandEntity>();
     public DbSet<PlaybackSessionEntity> PlaybackSessions => Set<PlaybackSessionEntity>();
 
+    public DbSet<SongRow> Songs => Set<SongRow>();
+    public DbSet<SettingRow> Settings => Set<SettingRow>();
+    public DbSet<FavouriteRow> Favourites => Set<FavouriteRow>();
+    public DbSet<RecentlyPlayedRow> RecentlyPlayed => Set<RecentlyPlayedRow>();
+    public DbSet<PlaylistRow> Playlists => Set<PlaylistRow>();
+    public DbSet<PlaylistSongRow> PlaylistSongs => Set<PlaylistSongRow>();
+    public DbSet<AlbumRow> Albums => Set<AlbumRow>();
+    public DbSet<ArtistRow> Artists => Set<ArtistRow>();
+    public DbSet<SavedSearchRow> SavedSearches => Set<SavedSearchRow>();
+    public DbSet<SearchHistoryRow> SearchHistory => Set<SearchHistoryRow>();
+    public DbSet<BlacklistedPlaylistRow> BlacklistedPlaylists => Set<BlacklistedPlaylistRow>();
+
+    /// <summary>The event log for one domain. See <see cref="SyncDomains.EventEntityName"/>.</summary>
+    public DbSet<SyncEventEntity> Events(SyncDomain domain) =>
+        Set<SyncEventEntity>(SyncDomains.EventEntityName(domain));
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        var events = modelBuilder.Entity<SyncEventEntity>();
-        events.ToTable("cloud_sync_events");
-        events.HasKey(x => x.Revision);
-        events.Property(x => x.Revision).HasColumnName("revision").UseIdentityAlwaysColumn();
-        events.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
-        events.Property(x => x.EventId).HasColumnName("event_id");
-        events.Property(x => x.DeviceId).HasColumnName("device_id");
-        events.Property(x => x.DeviceSequence).HasColumnName("device_sequence");
-        events.Property(x => x.HlcPhysicalMs).HasColumnName("hlc_physical_ms");
-        events.Property(x => x.HlcLogical).HasColumnName("hlc_logical");
-        events.Property(x => x.EntityType).HasColumnName("entity_type").HasMaxLength(48);
-        events.Property(x => x.EntityId).HasColumnName("entity_id").HasMaxLength(256);
-        events.Property(x => x.Operation).HasColumnName("operation").HasMaxLength(16);
-        events.Property(x => x.Payload).HasColumnName("payload").HasColumnType("jsonb");
-        events.Property(x => x.ReceivedAt).HasColumnName("received_at");
-        events.HasIndex(x => new { x.AccountId, x.EventId }).IsUnique();
-        events.HasIndex(x => new { x.AccountId, x.DeviceId, x.DeviceSequence }).IsUnique();
-        events.HasIndex(x => new { x.AccountId, x.Revision });
+        modelBuilder.HasSequence<long>(RevisionSequence);
 
-        var snapshots = modelBuilder.Entity<SnapshotEntity>();
-        snapshots.ToTable("cloud_snapshots");
-        snapshots.HasKey(x => new { x.AccountId, x.EntityType, x.EntityId });
-        snapshots.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
-        snapshots.Property(x => x.EntityType).HasColumnName("entity_type").HasMaxLength(48);
-        snapshots.Property(x => x.EntityId).HasColumnName("entity_id").HasMaxLength(256);
-        snapshots.Property(x => x.Revision).HasColumnName("revision");
-        snapshots.Property(x => x.HlcPhysicalMs).HasColumnName("hlc_physical_ms");
-        snapshots.Property(x => x.HlcLogical).HasColumnName("hlc_logical");
-        snapshots.Property(x => x.HlcDeviceId).HasColumnName("hlc_device_id");
-        snapshots.Property(x => x.Tombstone).HasColumnName("tombstone");
-        snapshots.Property(x => x.Payload).HasColumnName("payload").HasColumnType("jsonb");
+        foreach (var domain in SyncDomains.All)
+        {
+            var events = modelBuilder.SharedTypeEntity<SyncEventEntity>(
+                SyncDomains.EventEntityName(domain));
+            events.ToTable(SyncDomains.EventTableName(domain));
+            events.HasKey(x => x.Revision);
+            events.Property(x => x.Revision).HasColumnName("revision")
+                .HasDefaultValueSql($"nextval('\"{RevisionSequence}\"')");
+            events.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
+            events.Property(x => x.EventId).HasColumnName("event_id");
+            events.Property(x => x.DeviceId).HasColumnName("device_id");
+            events.Property(x => x.DeviceSequence).HasColumnName("device_sequence");
+            events.Property(x => x.HlcPhysicalMs).HasColumnName("hlc_physical_ms");
+            events.Property(x => x.HlcLogical).HasColumnName("hlc_logical");
+            events.Property(x => x.EntityType).HasColumnName("entity_type").HasMaxLength(48);
+            events.Property(x => x.EntityId).HasColumnName("entity_id").HasMaxLength(256);
+            events.Property(x => x.Operation).HasColumnName("operation").HasMaxLength(16);
+            events.Property(x => x.Payload).HasColumnName("payload").HasColumnType("jsonb");
+            events.Property(x => x.ReceivedAt).HasColumnName("received_at");
+            events.HasIndex(x => new { x.AccountId, x.EventId }).IsUnique();
+            events.HasIndex(x => new { x.AccountId, x.Revision });
+        }
+
+        ConfigureState<SongRow>(modelBuilder, "cloud_songs", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.VideoId });
+            entity.Property(x => x.VideoId).HasColumnName("video_id").HasMaxLength(64);
+            entity.Property(x => x.Title).HasColumnName("title").HasMaxLength(512);
+            entity.Property(x => x.Artists).HasColumnName("artists").HasColumnType("jsonb");
+            entity.Property(x => x.Album).HasColumnName("album").HasColumnType("jsonb");
+            entity.Property(x => x.DurationSeconds).HasColumnName("duration_s");
+            entity.Property(x => x.ArtworkUrl).HasColumnName("artwork_url").HasMaxLength(1024);
+            entity.Property(x => x.Year).HasColumnName("year").HasMaxLength(32);
+            entity.Property(x => x.DateMs).HasColumnName("date_ms");
+            entity.Property(x => x.TrackDetails).HasColumnName("track_details").HasColumnType("jsonb");
+        });
+
+        ConfigureState<SettingRow>(modelBuilder, "cloud_settings", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.Key });
+            entity.Property(x => x.Key).HasColumnName("key").HasMaxLength(128);
+            entity.Property(x => x.Value).HasColumnName("value").HasColumnType("jsonb");
+        });
+
+        ConfigureState<FavouriteRow>(modelBuilder, "cloud_favourites", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.VideoId });
+            entity.Property(x => x.VideoId).HasColumnName("video_id").HasMaxLength(64);
+        });
+
+        ConfigureState<RecentlyPlayedRow>(modelBuilder, "cloud_recently_played", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.EntryKey });
+            entity.Property(x => x.EntryKey).HasColumnName("entry_key").HasMaxLength(64);
+            entity.Property(x => x.VideoId).HasColumnName("video_id").HasMaxLength(64);
+        });
+
+        ConfigureState<PlaylistRow>(modelBuilder, "cloud_playlists", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.PlaylistId });
+            entity.Property(x => x.PlaylistId).HasColumnName("playlist_id").HasMaxLength(128);
+            entity.Property(x => x.Title).HasColumnName("title").HasMaxLength(512);
+            entity.Property(x => x.Description).HasColumnName("description").HasMaxLength(2048);
+            entity.Property(x => x.ThumbnailUrl).HasColumnName("thumbnail_url").HasMaxLength(1024);
+            entity.Property(x => x.ItemCount).HasColumnName("item_count").HasMaxLength(32);
+            entity.Property(x => x.IsPipedPlaylist).HasColumnName("is_piped_playlist");
+            entity.Property(x => x.IsCloudPlaylist).HasColumnName("is_cloud_playlist");
+        });
+
+        ConfigureState<PlaylistSongRow>(modelBuilder, "cloud_playlist_songs", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.PlaylistId, x.EntryKey });
+            entity.Property(x => x.PlaylistId).HasColumnName("playlist_id").HasMaxLength(128);
+            entity.Property(x => x.EntryKey).HasColumnName("entry_key").HasMaxLength(64);
+            entity.Property(x => x.VideoId).HasColumnName("video_id").HasMaxLength(64);
+        });
+
+        ConfigureState<AlbumRow>(modelBuilder, "cloud_albums", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.BrowseId });
+            entity.Property(x => x.BrowseId).HasColumnName("browse_id").HasMaxLength(128);
+            entity.Property(x => x.Title).HasColumnName("title").HasMaxLength(512);
+            entity.Property(x => x.Artists).HasColumnName("artists").HasColumnType("jsonb");
+            entity.Property(x => x.Year).HasColumnName("year").HasMaxLength(32);
+            entity.Property(x => x.Description).HasColumnName("description").HasMaxLength(2048);
+            entity.Property(x => x.ThumbnailUrl).HasColumnName("thumbnail_url").HasMaxLength(1024);
+            entity.Property(x => x.AudioPlaylistId).HasColumnName("audio_playlist_id").HasMaxLength(128);
+        });
+
+        ConfigureState<ArtistRow>(modelBuilder, "cloud_artists", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.BrowseId });
+            entity.Property(x => x.BrowseId).HasColumnName("browse_id").HasMaxLength(128);
+            entity.Property(x => x.Name).HasColumnName("name").HasMaxLength(256);
+            entity.Property(x => x.RadioId).HasColumnName("radio_id").HasMaxLength(128);
+            entity.Property(x => x.Subscribers).HasColumnName("subscribers").HasMaxLength(64);
+            entity.Property(x => x.ThumbnailUrl).HasColumnName("thumbnail_url").HasMaxLength(1024);
+        });
+
+        ConfigureState<SavedSearchRow>(modelBuilder, "cloud_saved_searches", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.EntryKey });
+            entity.Property(x => x.EntryKey).HasColumnName("entry_key").HasMaxLength(64);
+            entity.Property(x => x.Query).HasColumnName("query").HasMaxLength(512);
+        });
+
+        ConfigureState<SearchHistoryRow>(modelBuilder, "cloud_search_history", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.EntryKey });
+            entity.Property(x => x.EntryKey).HasColumnName("entry_key").HasMaxLength(64);
+            entity.Property(x => x.Query).HasColumnName("query").HasMaxLength(512);
+        });
+
+        ConfigureState<BlacklistedPlaylistRow>(modelBuilder, "cloud_blacklisted_playlists", entity =>
+        {
+            entity.HasKey(x => new { x.AccountId, x.PlaylistId });
+            entity.Property(x => x.PlaylistId).HasColumnName("playlist_id").HasMaxLength(128);
+            entity.Property(x => x.Details).HasColumnName("details").HasColumnType("jsonb");
+        });
 
         var devices = modelBuilder.Entity<DeviceEntity>();
         devices.ToTable("cloud_devices");
@@ -92,5 +204,22 @@ public sealed class CloudDbContext(DbContextOptions<CloudDbContext> options) : D
         sessions.Property(x => x.Playing).HasColumnName("playing");
         sessions.Property(x => x.ProgressUpdatedAt).HasColumnName("progress_updated_at");
         sessions.HasIndex(x => new { x.AccountId, x.EndedAt });
+    }
+
+    private static void ConfigureState<TRow>(
+        ModelBuilder modelBuilder,
+        string tableName,
+        Action<Microsoft.EntityFrameworkCore.Metadata.Builders.EntityTypeBuilder<TRow>> configure)
+        where TRow : StateRow
+    {
+        var entity = modelBuilder.Entity<TRow>();
+        entity.ToTable(tableName);
+        entity.Property(x => x.AccountId).HasColumnName("account_id").HasMaxLength(64);
+        entity.Property(x => x.Revision).HasColumnName("revision");
+        entity.Property(x => x.HlcPhysicalMs).HasColumnName("hlc_physical_ms");
+        entity.Property(x => x.HlcLogical).HasColumnName("hlc_logical");
+        entity.Property(x => x.HlcDeviceId).HasColumnName("hlc_device_id");
+        entity.Property(x => x.Tombstone).HasColumnName("tombstone");
+        configure(entity);
     }
 }

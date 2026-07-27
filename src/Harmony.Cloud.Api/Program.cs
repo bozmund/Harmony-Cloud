@@ -29,6 +29,7 @@ builder.Services.AddSingleton<AccountIdentity>();
 builder.Services.AddSingleton<FcmWakeupService>();
 builder.Services.AddSingleton<CloudMetrics>();
 builder.Services.AddSingleton<ReadinessProbe>();
+builder.Services.AddSingleton<StateProjector>();
 builder.Services.AddScoped<ISyncService, SyncService>();
 builder.Services.AddPooledDbContextFactory<CloudDbContext>(db =>
     db.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSql")

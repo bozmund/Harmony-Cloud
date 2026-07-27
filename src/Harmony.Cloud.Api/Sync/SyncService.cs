@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Harmony.Cloud.Api.Abstractions;
 using Harmony.Cloud.Api.Configuration;
 using Harmony.Cloud.Api.Diagnostics;
@@ -12,6 +11,7 @@ public sealed class SyncService(
     IDbContextFactory<CloudDbContext> contexts,
     CloudOptions options,
     TimeProvider clock,
+    StateProjector projector,
     CloudMetrics metrics) : ISyncService
 {
     public async Task<SyncResponse> SyncAsync(
@@ -33,9 +33,21 @@ public sealed class SyncService(
         var accepted = new List<Guid>();
         foreach (var incoming in request.Events.OrderBy(x => x.DeviceSequence))
         {
-            var exists = await db.SyncEvents.AnyAsync(
-                x => x.AccountId == accountId && x.EventId == incoming.EventId, cancellationToken);
-            if (exists)
+            // A device on an older build keeps sending domains this build no longer syncs
+            // (downloads, lyrics, import staging, the restored queue). Rejecting the batch would
+            // wedge that device's sync permanently, so acknowledge and drop instead: its outbox
+            // drains and nothing is stored.
+            if (!SyncDomains.TryParse(incoming.EntityType, out var domain))
+            {
+                accepted.Add(incoming.EventId);
+                if (incoming.DeviceSequence > device.LastSequence)
+                    device.LastSequence = incoming.DeviceSequence;
+                continue;
+            }
+
+            var events = db.Events(domain);
+            if (await events.AnyAsync(
+                    x => x.AccountId == accountId && x.EventId == incoming.EventId, cancellationToken))
             {
                 accepted.Add(incoming.EventId);
                 continue;
@@ -59,9 +71,9 @@ public sealed class SyncService(
                 Payload = payload,
                 ReceivedAt = now
             };
-            db.SyncEvents.Add(entity);
+            events.Add(entity);
             await db.SaveChangesAsync(cancellationToken);
-            await MergeSnapshotAsync(db, entity, cancellationToken);
+            await projector.ApplyAsync(db, domain, entity, cancellationToken);
             device.LastSequence = incoming.DeviceSequence;
             accepted.Add(incoming.EventId);
         }
@@ -70,59 +82,39 @@ public sealed class SyncService(
         device.UpdatedAt = now;
         await db.SaveChangesAsync(cancellationToken);
 
-        var changeEntities = await db.SyncEvents.AsNoTracking()
-            .Where(x => x.AccountId == accountId && x.Revision > request.Checkpoint)
-            .OrderBy(x => x.Revision)
-            .Take(options.MaxEventsPerSync)
-            .ToListAsync(cancellationToken);
-        var changes = changeEntities.Select(x => new ServerSyncEvent(
-            x.Revision, x.EventId, x.DeviceId, x.DeviceSequence, x.HlcPhysicalMs, x.HlcLogical,
-            x.EntityType, x.EntityId, x.Operation, x.Payload.RootElement.Clone())).ToList();
+        var changes = await ReadChangesAsync(db, accountId, request.Checkpoint, cancellationToken);
         var checkpoint = changes.Count == 0 ? request.Checkpoint : changes[^1].Revision;
         await transaction.CommitAsync(cancellationToken);
         metrics.RecordAcceptedSyncEvents(accepted.Count);
         return new SyncResponse(checkpoint, accepted, changes);
     }
 
-    private static async Task MergeSnapshotAsync(
-        CloudDbContext db, SyncEventEntity incoming, CancellationToken cancellationToken)
+    /// <summary>
+    /// Merges the per-domain logs back into one revision-ordered feed. Every domain table draws
+    /// <c>revision</c> from the same sequence, so ordering across tables is total and a device can
+    /// still track its position with a single checkpoint.
+    /// </summary>
+    private async Task<List<ServerSyncEvent>> ReadChangesAsync(
+        CloudDbContext db, string accountId, long checkpoint, CancellationToken cancellationToken)
     {
-        var snapshot = await db.Snapshots.SingleOrDefaultAsync(
-            x => x.AccountId == incoming.AccountId
-                && x.EntityType == incoming.EntityType
-                && x.EntityId == incoming.EntityId,
-            cancellationToken);
-        if (snapshot is not null && Compare(snapshot, incoming) >= 0) return;
-
-        if (snapshot is null)
+        var merged = new List<SyncEventEntity>();
+        foreach (var domain in SyncDomains.All)
         {
-            snapshot = new SnapshotEntity
-            {
-                AccountId = incoming.AccountId,
-                EntityType = incoming.EntityType,
-                EntityId = incoming.EntityId,
-                Payload = JsonDocument.Parse(incoming.Payload.RootElement.GetRawText())
-            };
-            db.Snapshots.Add(snapshot);
+            var slice = await db.Events(domain).AsNoTracking()
+                .Where(x => x.AccountId == accountId && x.Revision > checkpoint)
+                .OrderBy(x => x.Revision)
+                .Take(options.MaxEventsPerSync)
+                .ToListAsync(cancellationToken);
+            merged.AddRange(slice);
         }
-        else
-        {
-            snapshot.Payload.Dispose();
-            snapshot.Payload = JsonDocument.Parse(incoming.Payload.RootElement.GetRawText());
-        }
-        snapshot.Revision = incoming.Revision;
-        snapshot.HlcPhysicalMs = incoming.HlcPhysicalMs;
-        snapshot.HlcLogical = incoming.HlcLogical;
-        snapshot.HlcDeviceId = incoming.DeviceId;
-        snapshot.Tombstone = incoming.Operation == "delete";
-    }
 
-    private static int Compare(SnapshotEntity snapshot, SyncEventEntity incoming)
-    {
-        var physical = snapshot.HlcPhysicalMs.CompareTo(incoming.HlcPhysicalMs);
-        if (physical != 0) return physical;
-        var logical = snapshot.HlcLogical.CompareTo(incoming.HlcLogical);
-        return logical != 0 ? logical : snapshot.HlcDeviceId.CompareTo(incoming.DeviceId);
+        return merged
+            .OrderBy(x => x.Revision)
+            .Take(options.MaxEventsPerSync)
+            .Select(x => new ServerSyncEvent(
+                x.Revision, x.EventId, x.DeviceId, x.DeviceSequence, x.HlcPhysicalMs, x.HlcLogical,
+                x.EntityType, x.EntityId, x.Operation, x.Payload.RootElement.Clone()))
+            .ToList();
     }
 
     private static void Validate(SyncRequest request)
