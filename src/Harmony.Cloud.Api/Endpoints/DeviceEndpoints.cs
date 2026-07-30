@@ -11,6 +11,7 @@ public static class DeviceEndpoints
     public static RouteGroupBuilder MapDeviceEndpoints(this RouteGroupBuilder cloud)
     {
         cloud.MapPost("/devices/register", RegisterAsync);
+        cloud.MapDelete("/devices/{deviceId:guid}", RemoveAsync);
         cloud.MapPost("/playback/presence", RecordPresenceAsync);
         cloud.MapPut("/playback/push-registration", RegisterPushAsync);
         return cloud;
@@ -36,6 +37,36 @@ public static class DeviceEndpoints
         device.LastSeenAt = device.UpdatedAt;
         await db.SaveChangesAsync(cancellationToken);
         return Results.Ok(new { request.DeviceId });
+    }
+
+    private static async Task<IResult> RemoveAsync(Guid deviceId, HttpContext context, AccountIdentity identity,
+        IDbContextFactory<CloudDbContext> contexts, PlaybackConnectionRegistry sockets, TimeProvider clock,
+        CancellationToken cancellationToken)
+    {
+        var accountId = identity.Resolve(context);
+        await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+        var device = await db.Devices.SingleOrDefaultAsync(
+            x => x.AccountId == accountId && x.DeviceId == deviceId, cancellationToken);
+        if (device is null) return Results.NotFound();
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var sessions = await db.PlaybackSessions
+            .Where(x => x.AccountId == accountId && x.TargetDeviceId == deviceId && x.EndedAt == null)
+            .ToListAsync(cancellationToken);
+        foreach (var session in sessions) session.EndedAt = clock.GetUtcNow();
+        await db.PlaybackCommands
+            .Where(x => x.AccountId == accountId &&
+                        (x.SourceDeviceId == deviceId || x.TargetDeviceId == deviceId))
+            .ExecuteDeleteAsync(cancellationToken);
+        db.Devices.Remove(device);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+
+        sockets.Disconnect(accountId, deviceId);
+        foreach (var session in sessions)
+            await sockets.BroadcastAsync(accountId, new SessionEndedFrame(session.SessionId),
+                exceptDeviceId: null, cancellationToken);
+        return Results.NoContent();
     }
 
     private static async Task<IResult> RecordPresenceAsync(DevicePresenceRequest request, HttpContext context, AccountIdentity identity,

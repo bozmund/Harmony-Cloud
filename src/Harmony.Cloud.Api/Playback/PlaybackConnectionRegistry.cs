@@ -39,6 +39,15 @@ public sealed class PlaybackConnectionRegistry(ILogger<PlaybackConnectionRegistr
         && devices.TryGetValue(deviceId, out var connection)
         && connection.IsOpen;
 
+    public void Disconnect(string accountId, Guid deviceId)
+    {
+        if (!_accounts.TryGetValue(accountId, out var devices)
+            || !devices.TryRemove(deviceId, out var connection))
+            return;
+        connection.Abort();
+        if (devices.IsEmpty) _accounts.TryRemove(accountId, out _);
+    }
+
     public Task SendAsync<TFrame>(string accountId, Guid deviceId, TFrame frame, CancellationToken cancellationToken)
     {
         if (!_accounts.TryGetValue(accountId, out var devices)
