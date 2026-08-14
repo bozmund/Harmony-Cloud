@@ -129,6 +129,20 @@ app.MapGet("/health/ready", async (ReadinessProbe probe, CancellationToken cance
         ? Results.Ok(new { status = "ready" })
         : Results.Json(new { status = "not_ready" }, statusCode: StatusCodes.Status503ServiceUnavailable));
 app.MapPrometheusScrapingEndpoint("/metrics");
+
+// Mapped on `app`, deliberately NOT on the `cloud` group below: the caller here is a browser finishing
+// an Auth0 redirect, and it has no bearer token to present. Nothing account-scoped is read or written —
+// the request is forwarded straight back to the desktop app's custom scheme and never inspected.
+// The scheme is a path segment, not a query parameter: Auth0 matches redirect_uri against the
+// Allowed Callback URLs list exactly, so one registered URL per scheme is the unambiguous shape.
+app.MapGet("/cloud/auth/windows/callback/{scheme}", (string scheme, HttpContext context) =>
+{
+    var redirect = WindowsAuthCallbackPage.BuildRedirect(scheme, context.Request.QueryString.Value);
+    if (redirect is null) return Results.BadRequest(new { code = "unsupported_callback_scheme" });
+    context.Response.Headers.CacheControl = "no-store";
+    return Results.Content(WindowsAuthCallbackPage.Render(redirect), "text/html; charset=utf-8");
+}).ExcludeFromDescription();
+
 var cloud = app.MapGroup("/cloud/v1");
 if (authEnabled) cloud.RequireAuthorization();
 cloud.MapSyncEndpoints();

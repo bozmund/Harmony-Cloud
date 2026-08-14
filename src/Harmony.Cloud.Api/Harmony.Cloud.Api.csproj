@@ -1,4 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- Served pages live in real .html files for editor tooling, and travel inside the assembly so a
+       publish cannot leave them behind. LogicalName pins the resource key to the file name, so moving
+       the file between folders cannot silently break the lookup. -->
+  <ItemGroup>
+    <Content Remove="Domain\WindowsAuthCallbackPage.html" />
+    <EmbeddedResource Include="Domain\WindowsAuthCallbackPage.html" LogicalName="WindowsAuthCallbackPage.html" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
