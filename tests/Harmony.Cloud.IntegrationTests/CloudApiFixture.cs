@@ -15,8 +15,9 @@ namespace Harmony.Cloud.IntegrationTests;
 /// </summary>
 public sealed class CloudApiFixture : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder()
-        .WithImage("postgres:17-alpine")
+    // Testcontainers 4.14 obsoleted the parameterless builder; the image is a constructor argument
+    // now, so it can no longer be left implicit and silently default to a version nobody chose.
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine")
         .WithDatabase("harmony_cloud_tests")
         .WithUsername("harmony")
         .WithPassword("test-only-password")
