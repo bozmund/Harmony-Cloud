@@ -66,6 +66,14 @@ public sealed class TestAccount
             state
         });
 
+    /// A device declaring itself the audio target for what it is already playing.
+    public Task<HttpResponseMessage> ClaimSessionAsync(Guid device, JsonElement state) =>
+        PostAsync("playback/session/claim", new
+        {
+            deviceId = device,
+            state
+        });
+
     public Task<HttpResponseMessage> PostAsync(string path, object body) =>
         Client.PostAsJsonAsync(Route(path), body);
 

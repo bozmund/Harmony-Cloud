@@ -13,6 +13,16 @@ public sealed record PlaybackSessionStartRequest(Guid SourceDeviceId, Guid Targe
 public sealed record PlaybackSessionCommandRequest(Guid SourceDeviceId, Guid TargetDeviceId, string Type, JsonElement Payload);
 public sealed record PlaybackSessionStateRequest(Guid DeviceId, JsonElement State);
 public sealed record PlaybackSessionTargetRequest(Guid SourceDeviceId, Guid TargetDeviceId, JsonElement State);
+/// <summary>
+/// A device declaring itself the audio target for what it is already playing, so other
+/// devices can subscribe to it as a remote.
+/// </summary>
+/// <remarks>
+/// Distinct from <see cref="PlaybackSessionStartRequest"/>, which is a handoff: one device
+/// pushing its queue onto another. Here there is no second device and nothing is handed
+/// anywhere — no command is emitted, and the caller keeps playing exactly as it was.
+/// </remarks>
+public sealed record PlaybackSessionClaimRequest(Guid DeviceId, JsonElement State);
 /// <param name="State">Durable v2 state: ordered queueIds, index, and modes.</param>
 /// <param name="PositionMs">
 /// Last persisted progress. Only periodically written (live progress arrives over the socket), so a
