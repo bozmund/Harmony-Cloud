@@ -266,4 +266,88 @@ public sealed class PlaybackSessionTests(CloudApiFixture fixture)
 
         Assert.Null(await stranger.GetSessionAsync());
     }
+
+    [Fact]
+    public async Task Claim_names_the_calling_device_as_target()
+    {
+        // The point of a claim: a device already playing on its own becomes the
+        // audio target so other devices can subscribe to it as a remote.
+        var account = TestAccount.New(fixture);
+        var windows = await account.RegisterDeviceAsync("Harmony Windows", "windows");
+
+        var claimed = await account.ClaimSessionAsync(windows, TestAccount.State(["aaaaaaaaaaa", "bbbbbbbbbbb"]));
+        Assert.Equal(HttpStatusCode.Accepted, claimed.StatusCode);
+
+        var session = (await account.GetSessionAsync())!.Value;
+        Assert.Equal(windows, session.GetProperty("targetDeviceId").GetGuid());
+        Assert.Equal(2, session.GetProperty("state").GetProperty("queueIds").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Claim_seeds_progress_so_a_subscriber_opens_at_the_right_position()
+    {
+        var account = TestAccount.New(fixture);
+        var windows = await account.RegisterDeviceAsync("Harmony Windows", "windows");
+        var state = JsonSerializer.SerializeToElement(new
+        {
+            schemaVersion = 2,
+            queueIds = new[] { "aaaaaaaaaaa" },
+            index = 0,
+            currentSongId = "aaaaaaaaaaa",
+            queueRevision = 1,
+            positionMs = 42_000,
+            playing = true
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, (await account.ClaimSessionAsync(windows, state)).StatusCode);
+
+        var session = (await account.GetSessionAsync())!.Value;
+        Assert.Equal(42_000, session.GetProperty("positionMs").GetInt64());
+        Assert.True(session.GetProperty("playing").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Claim_refuses_to_steal_a_session_owned_by_another_device()
+    {
+        // A device that started playing on its own has no mandate to stop audio
+        // somewhere else. Retargeting here would silently do exactly that.
+        var account = TestAccount.New(fixture);
+        var (source, target) = await account.RegisterTwoDevicesAsync();
+        Assert.Equal(HttpStatusCode.Accepted,
+            (await account.StartSessionAsync(source, target, TestAccount.State(["aaaaaaaaaaa"]))).StatusCode);
+
+        var claimed = await account.ClaimSessionAsync(source, TestAccount.State(["bbbbbbbbbbb"]));
+        Assert.Equal(HttpStatusCode.Conflict, claimed.StatusCode);
+
+        var session = (await account.GetSessionAsync())!.Value;
+        Assert.Equal(target, session.GetProperty("targetDeviceId").GetGuid());
+    }
+
+    [Fact]
+    public async Task Re_claiming_refreshes_state_without_churning_the_session_id()
+    {
+        // Subscribers key off the session id, so a device refreshing what it
+        // advertises must not look like a brand new session.
+        var account = TestAccount.New(fixture);
+        var windows = await account.RegisterDeviceAsync("Harmony Windows", "windows");
+
+        await account.ClaimSessionAsync(windows, TestAccount.State(["aaaaaaaaaaa"]));
+        var first = (await account.GetSessionAsync())!.Value.GetProperty("sessionId").GetGuid();
+
+        await account.ClaimSessionAsync(windows, TestAccount.State(["bbbbbbbbbbb", "ccccccccccc"]));
+        var second = (await account.GetSessionAsync())!.Value;
+
+        Assert.Equal(first, second.GetProperty("sessionId").GetGuid());
+        Assert.Equal(2, second.GetProperty("state").GetProperty("queueIds").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Claim_rejects_an_unregistered_device()
+    {
+        var account = TestAccount.New(fixture);
+        var stranger = Guid.NewGuid();
+
+        var claimed = await account.ClaimSessionAsync(stranger, TestAccount.State(["aaaaaaaaaaa"]));
+        Assert.Equal(HttpStatusCode.NotFound, claimed.StatusCode);
+    }
 }

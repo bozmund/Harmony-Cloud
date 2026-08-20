@@ -331,6 +331,60 @@ cloud.MapPost("/playback/session/start", async (PlaybackSessionStartRequest requ
         new { sessionId = session.SessionId, commandId = command.CommandId });
 });
 
+cloud.MapPost("/playback/session/claim", async (PlaybackSessionClaimRequest request, HttpContext context,
+    AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, PlaybackConnectionRegistry sockets,
+    TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    if (request.DeviceId == Guid.Empty || !PlaybackPayload.IsPortable(request.State))
+        return Results.BadRequest(new { code = "invalid_playback_session" });
+    if (!PlaybackSessionState.IsValid(request.State, out var stateFailure))
+        return Results.BadRequest(new { code = stateFailure });
+    var accountId = identity.Resolve(context);
+    await using var db = await contexts.CreateDbContextAsync(cancellationToken);
+    var device = await db.Devices.SingleOrDefaultAsync(
+        x => x.AccountId == accountId && x.DeviceId == request.DeviceId, cancellationToken);
+    if (device is null) return Results.NotFound(new { code = "device_not_found" });
+    var now = clock.GetUtcNow();
+    var live = await db.PlaybackSessions.Where(x => x.AccountId == accountId && x.EndedAt == null)
+        .ToListAsync(cancellationToken);
+    // Unlike a handoff, a claim never takes the session away from someone else. A device
+    // that started playing on its own has no mandate to stop audio on another device, and
+    // silently retargeting would do exactly that.
+    if (live.Any(x => x.TargetDeviceId != request.DeviceId))
+        return Results.Conflict(new { code = "playback_session_active" });
+    // Re-claiming is idempotent: refresh the state this device is advertising rather than
+    // churning the session id, which subscribers key off.
+    var session = live.SingleOrDefault(x => x.TargetDeviceId == request.DeviceId);
+    if (session is null)
+    {
+        session = new PlaybackSessionEntity
+        {
+            AccountId = accountId,
+            SessionId = Guid.NewGuid(),
+            TargetDeviceId = request.DeviceId,
+            State = JsonDocument.Parse(request.State.GetRawText()),
+            Sequence = 1,
+            UpdatedAt = now
+        };
+        db.PlaybackSessions.Add(session);
+    }
+    else
+    {
+        session.State = JsonDocument.Parse(request.State.GetRawText());
+        session.Sequence += 1;
+        session.UpdatedAt = now;
+    }
+    PlaybackSessionState.SeedProgress(session, request.State, now);
+    await db.SaveChangesAsync(cancellationToken);
+    // No command frame: nothing is being handed anywhere. The broadcast is the whole point —
+    // it tells the other devices a session now exists and who owns the audio, which is what
+    // lets one of them subscribe as a remote.
+    await sockets.BroadcastAsync(accountId, SessionSnapshotFrame.From(session),
+        exceptDeviceId: request.DeviceId, cancellationToken);
+    return Results.Accepted($"/cloud/v1/playback/session/{session.SessionId}",
+        new { sessionId = session.SessionId });
+});
+
 cloud.MapPost("/playback/session/command", async (PlaybackSessionCommandRequest request, HttpContext context,
     AccountIdentity identity, IDbContextFactory<CloudDbContext> contexts, PlaybackConnectionRegistry sockets,
     FcmWakeupService fcm, TimeProvider clock, CancellationToken cancellationToken) =>
